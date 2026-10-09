@@ -21,9 +21,10 @@ npx -y -p typescript@5.6.3 tsc -p .
 ```
 
 ## Release
-1. Bump `version` in both `plugin.json` and `marketplace.json`.
-2. Commit and push to `main`.
-3. Update the installed copy: `claude plugin marketplace update zero-progress`, then `claude plugin update zero-progress@zero-progress`.
+1. Run `docs/live-test.md` in a real session if the change touches how the bar reads todos, tools or subagents.
+2. Bump `version` in both `plugin.json` and `marketplace.json`.
+3. Commit and push to `main`.
+4. Update the installed copy: `claude plugin marketplace update zero-progress`, then `claude plugin update zero-progress@zero-progress`.
 
 ## Gotchas
 - The terminal has no `Svg` element. Guard desktop drawing with `e.surface === 'desktop'`.
