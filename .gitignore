@@ -1,0 +1,9 @@
+.DS_Store
+node_modules/
+*.log
+
+# Written by Claude Code when it loads the plugin from this folder: the API types tsc reads.
+.claude-plugin/types/
+
+# Per-person Claude Code settings.
+.claude/settings.local.json

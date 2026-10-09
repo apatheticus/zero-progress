@@ -1,0 +1,21 @@
+{
+  "name": "zero-progress",
+  "version": "0.1.0",
+  "description": "Always-on progress bar above the prompt plus a live subagents panel (/zero-agents). Reads the todo list or its own progress tool; no skill needed.",
+  "author": {
+    "name": "apatheticus",
+    "url": "https://github.com/apatheticus"
+  },
+  "homepage": "https://github.com/apatheticus/zero-progress",
+  "repository": "https://github.com/apatheticus/zero-progress",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "autoOpen": {
+      "type": "boolean",
+      "title": "Open the agents panel on the first subagent",
+      "description": "Opens the panel once per task when a subagent starts",
+      "default": true
+    }
+  },
+  "license": "MIT"
+}

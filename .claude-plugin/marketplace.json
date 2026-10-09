@@ -1,0 +1,14 @@
+{
+  "name": "zero-progress",
+  "owner": { "name": "apatheticus", "url": "https://github.com/apatheticus" },
+  "metadata": { "description": "Always-on progress bar and subagents panel for Claude Code." },
+  "plugins": [
+    {
+      "name": "zero-progress",
+      "source": "./",
+      "description": "Mod: progress bar above the prompt on every task, plus a live subagents panel. No skill needed.",
+      "version": "0.1.0",
+      "category": "mod"
+    }
+  ]
+}
