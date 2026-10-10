@@ -1,6 +1,6 @@
 {
   "name": "zero-progress",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Always-on progress bar above the prompt plus a live subagents panel (/zero-agents). Reads the todo list or its own progress tool; no skill needed.",
   "author": {
     "name": "apatheticus",

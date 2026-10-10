@@ -7,7 +7,7 @@
       "name": "zero-progress",
       "source": "./",
       "description": "Mod: progress bar above the prompt on every task, plus a live subagents panel. No skill needed.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "category": "mod"
     }
   ]
