@@ -1020,6 +1020,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const b = await read($, bar)
     if (b === null || e.props.hasSurvey) return next(e)
+    // The band is one instance: what draws beneath (Zero Context's meter) stays, under this bar.
+    const below = await next(e)
 
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
@@ -1038,10 +1040,13 @@ export const register: Register = (on, options) => {
       // and their gaps. No floor above the slot: a row wider than it would wrap.
       const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
       return (
-        <Box flexDirection="row" alignItems="center" gap={1}>
-          <Svg source={rowSvg(b, width, running, at)} alt={`${headline(b)}: ${text}, ${side}`} width={width} height={H} />
-          {list.length > 0 && crewButton}
-          {dismiss}
+        <Box flexDirection="column">
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Svg source={rowSvg(b, width, running, at)} alt={`${headline(b)}: ${text}, ${side}`} width={width} height={H} />
+            {list.length > 0 && crewButton}
+            {dismiss}
+          </Box>
+          {below}
         </Box>
       )
     }
@@ -1051,17 +1056,20 @@ export const register: Register = (on, options) => {
     const titleW = Math.max(8, Math.min(30, head.length + 2, Math.floor(cols / 3)))
     const width = Math.max(6, Math.min(40, cols - titleW - 32))
     return (
-      <Box flexDirection="row" gap={2}>
-        <Box width={titleW} flexShrink={0}>
-          <Text color={color}>● </Text>
-          <Text wrap="truncate-end">{head}</Text>
+      <Box flexDirection="column">
+        <Box flexDirection="row" gap={2}>
+          <Box width={titleW} flexShrink={0}>
+            <Text color={color}>● </Text>
+            <Text wrap="truncate-end">{head}</Text>
+          </Box>
+          <Text color={color}>{barText(b, width, at)}</Text>
+          <Text bold>{text}</Text>
+          <Text dimColor>{side}</Text>
+          {list.length > 0 && <Text color={CLAY}>▣</Text>}
+          {list.length > 0 && crewButton}
+          {dismiss}
         </Box>
-        <Text color={color}>{barText(b, width, at)}</Text>
-        <Text bold>{text}</Text>
-        <Text dimColor>{side}</Text>
-        {list.length > 0 && <Text color={CLAY}>▣</Text>}
-        {list.length > 0 && crewButton}
-        {dismiss}
+        {below}
       </Box>
     )
   })

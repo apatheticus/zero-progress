@@ -15,7 +15,7 @@ const shown = async ($: Engine, component: 'AbovePrompt' | 'Pane' = 'AbovePrompt
 let nextTask = 1
 const core = (on: On) => {
   mock.clock(on, { now: 1_000_000 })
-  on('ui.render', async () => null as never)
+  on('ui.render', async () => ({ type: 'Box' }) as never)
   on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
   on('turn.start', async (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', async () => ({ text: '' }) as never)
@@ -147,6 +147,20 @@ test('the band draws on the terminal and the desktop', async ($, on) => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'zero-progress', surface, component: 'AbovePrompt', props: { bodyColumns: 120, hasSurvey: false } } as never)
     expect(await ui.find({ key: 'zero-dismiss' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('a lower hook keeps its row, drawn under the bar', async ($, on) => {
+  // Registered first, so it stands above core's catch-all: the plugin's `next` reaches it.
+  on('ui.render', { component: 'AbovePrompt' }, async () => ({ type: 'Box', children: [{ type: 'Text', children: ['Context row'] }] }) as never)
+  core(on)
+  await start($, 'Stack me')
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'zero-progress', surface, component: 'AbovePrompt', props: { bodyColumns: 120, hasSurvey: false } } as never)
+    const text = JSON.stringify(await ui.drawn())
+    expect(text).toContain('Context row')
+    expect(text.indexOf('zero-dismiss')).toBeLessThan(text.indexOf('Context row'))
     await ui.unmount()
   }
 })
