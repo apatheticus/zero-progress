@@ -7,3 +7,6 @@ node_modules/
 
 # Per-person Claude Code settings.
 .claude/settings.local.json
+
+# /zero-selftest reports, when HOME is unset.
+.selftest/

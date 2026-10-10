@@ -59,6 +59,25 @@ export type Panel = {
   autoOpenedFor: string
 }
 
+/** The live `/zero-selftest` run, if any. Its evidence lives in a module buffer, not here. */
+export type SelftestRun = {
+  runId: string
+  path: 'todo' | 'progress'
+  /** `running` keeps the guards up; `ended` drops them. */
+  status: 'running' | 'ended'
+  /** Index into the scenario of the step submitted last; -1 before the first. */
+  step: number
+  /** The submitted step's own turn has started. */
+  isStepStarted: boolean
+  /** A main turn runs now. */
+  isMainBusy: boolean
+  startedAt: number
+  /** The last turn start or end, main or subagent: the driver waits for a quiet gap after it. */
+  activeAt: number
+  /** Where the trace and report are written. */
+  file: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'zero-progress': {
@@ -66,6 +85,7 @@ declare module 'claude-code' {
       agents: AgentRun[]
       panel: Panel
       now: number
+      selftest: SelftestRun | null
     }
   }
 }

@@ -1,93 +1,67 @@
-# Live test: Zero Progress with the todo tools on
+# Live test: `/zero-selftest`
 
-Goal: prove the bar reads Claude's real todo list, not just the test kit's fake one.
-Time: about 15 minutes. Tick each box as you go.
+Goal: prove the bar reads Claude's real todo list, tools and subagents, not just the test kit's fakes.
+The mod runs the test itself, in the session you start it from, and grades it.
+Time: about 10 minutes. No input from you after the command.
 
-## 0. Start
+## Run it
 
-Run this in a new terminal. It runs the session in this repo, turns the todo tools on, and logs to a file:
+In a new terminal, from this repo:
 
 ```sh
 cd /Volumes/Data/dev/zero-progress
-CLAUDE_CODE_ENABLE_TODO_TOOLS=1 claude --debug-file /Volumes/Data/scratch/zp-debug.log
+CLAUDE_CODE_ENABLE_TODO_TOOLS=1 claude --plugin-dir /Volumes/Data/dev/zero-progress
 ```
 
-- [ ] `/plugin` lists `zero-progress` as enabled, and `savvy-progress` is gone.
+Then type `/zero-selftest` and keep your hands off.
 
-## 1. No plan: activity bar
+- The first line names the plugin folder and version under test. A `--plugin-dir` run shows this repo. Otherwise it's the installed copy.
+- It also names the path:
+  - **todo:** `TodoWrite` or `TaskCreate` is offered.
+  - **progress:** neither is offered, so the bar reads `mcp__zero-progress__progress`. Run without the env var to test this one.
 
-Paste:
-```
-What does hooks/hooks.json contain? One line, no tools besides Read.
-```
+## What it does
 
-- [ ] A bar appears titled with your prompt's first line.
-- [ ] It shows a sweeping segment and a step count or time, not a percentage.
-- [ ] It ends on Done.
+It types six prompts, one per step. Each goes in once the session has been quiet for 3 seconds: no main turn and no subagent running.
 
-## 2. Todo list drives the bar
+| Step | Prompt | Checks |
+|---|---|---|
+| s1 | Read `hooks/hooks.json`, one line | Bar titled with the prompt's first line. `Thinking` or `N steps`, no `%`. Ends on `Done`. |
+| s2 | A 4-step plan, one step at a time | Count reaches 4 and only climbs. Names the current step. `%` matches the count. Todo path: the main agent never calls the progress tool. Progress path: it does. Pane shows `Plan · d/4` with ✓ and ○. |
+| s3 | A 3-step plan with an Explore and a general-purpose subagent in parallel | Pane opens at the first spawn. Explore wears the pirate crab. The general-purpose row reaches `3/3` with a step name. Main bar stays at 3 steps. `Waiting · N` if the main turn ends first. Ends on `Done`. |
+| s4a | A 3-step plan, stop after step 1 | Bar sits at `1/3`, not `Done`. |
+| s4b | "Delete step 2 from the list, then finish step 3." | Same bar (same title and start). Total drops to 2. Ends on `Done`. |
+| s5 | "Say OK." after the mod dismisses the bar | The bar is gone after the dismiss. The prompt brings a new bar. |
 
-Paste:
-```
-Don't edit any files. Make a todo list with these 4 steps, then work through them one at a time, marking each in progress and then done:
-1. Count the lines in hooks/register.tsx
-2. List every on('...') hook it registers
-3. Count the tests in tests/bar.test.ts
-4. Summarize in 3 lines
-```
+Before s1 it dismisses any old bar. Before s2 it opens the agents pane. Before s3 it closes the pane, so the first spawn has to reopen it.
 
-- [ ] The bar shows `0/4` (or `1/4`) early, then climbs to `4/4`.
-- [ ] It names the current step ("Counting lines…"), not just the prompt.
-- [ ] The percentage moves with the count.
-- [ ] Claude never calls `mcp__zero-progress__progress`. The todo list is the only source.
-- [ ] `/zero-agents` shows a "Plan" section with ✓ and ○ marks.
+While the run is live:
+- Prompt suggestions are hidden. There is nothing to Tab into.
+- `Edit`, `Write`, `NotebookEdit`, `Bash` and `AskUserQuestion` are denied. Nothing gets written or pushed, and no dialog can stall the run.
+- A prompt from anyone else (you, a peer session, another plugin) goes through but ends the run as interrupted.
+- Each step has 5 minutes. A step that runs over ends the run.
 
-## 3. Subagents, with and without their own list
+## The report
 
-Paste:
-```
-Don't edit any files. Make a 3-step todo list: (1) spawn an Explore subagent to find the longest function in hooks/register.tsx, (2) spawn a general-purpose subagent that makes its own 3-step todo list and uses it to count the tests, constants, and type exports in this repo, (3) combine both answers. Run both subagents in parallel.
-```
+`~/.claude/zero-progress/selftest-<time>.json` is written after every step, so a crash still leaves evidence. It holds:
+- `events`: every turn, todo or progress call, spawn and pane check. Every change the band or the pane drew. A snapshot of the bar and the agents at each step boundary.
+- `results`: one row per check, `pass`, `fail` or `skip`, with its evidence.
 
-- [ ] `/zero-agents` opens by itself at the first subagent, or opens when you type it.
-- [ ] The Explore row wears the pirate crab.
-- [ ] The general-purpose row shows its own `d/3` bar and step name.
-- [ ] The main bar does not jump to the subagent's list.
-- [ ] If the main turn ends first, the bar reads `Waiting · N`, then Done when the subagents finish.
+At the end:
+1. The transcript gets one dim line per check (✓ pass, ✗ fail, – skip).
+2. The mod sends one last prompt. The model reads the trace and judges each fail and skip: is the mod wrong, or did the model not follow the scenario?
+3. The model ends with `Zero Progress self-test: passed __ / failed __ / skipped __. Notes: __`.
 
-## 4. Carry over and delete
+A release needs `failed 0`. A skip says why: for example, the pane waits undrawn on a terminal under 144 columns.
 
-Paste:
-```
-Don't edit any files. Make a 3-step todo list: (1) read README.md, (2) read LICENSE, (3) read types/index.d.ts. Do step 1 only, then stop and ask me whether to continue.
-```
+On the todo path, if everything passed, the verdict recommends adding `"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"` to the env block in `~/.claude/settings.json`. Nothing edits that file for you.
 
-- [ ] The bar sits at `1/3` and does not show Done.
+## Stop it
 
-Then paste:
-```
-Delete step 2 from the list, then finish step 3.
-```
+`/zero-selftest stop` ends a run at once. It writes a partial report and skips the model review.
 
-- [ ] It's the same bar (same title), not a new one.
-- [ ] The total drops to 2 and ends on Done.
+## Eyes only (optional)
 
-## 5. Dismiss
-
-- [ ] The ✕ on the bar hides it.
-- [ ] Your next prompt brings a new bar back.
-
-## 6. Report
-
-If anything fails, run this in a normal terminal and paste the output back:
-
-```sh
-grep -iE 'zero-progress|ui.render \(' /Volumes/Data/scratch/zp-debug.log | tail -40
-```
-
-Then paste this into the new session, or bring it back to the old one:
-
-```
-Zero Progress live test: sections passed: __ / failed: __ . Notes: __
-If all passed, add "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1" to the env block in ~/.claude/settings.json.
-```
+Two things the trace can't see:
+- [ ] On the desktop app, the crab art draws in the band and in the pane rows.
+- [ ] A real click on the ✕ hides the bar. The test presses it through the same code, but not with a mouse.

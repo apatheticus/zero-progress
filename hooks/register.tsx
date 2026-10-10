@@ -1,7 +1,9 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, PromptOrigin, Register } from 'claude-code'
 
-import type { AgentRun, Bar, Item, ItemStatus, Panel } from '../types'
+import type { AgentRun, Bar, Item, ItemStatus, Panel, SelftestRun } from '../types'
+import { SCENARIO, evaluate, firstLine, newTrace, resultLine, reviewPrompt, tally } from './selftest'
+import type { PaneRow, RunStatus, Trace, TraceInput } from './selftest'
 
 // Forked from savvy-progress by johnnyvizz (MIT): the drawing code is his; the bar's
 // sources are new. Nothing here needs a skill: the bar reads the todo tools when they
@@ -15,6 +17,7 @@ const panel = atom({ plugin: 'zero-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'zero-progress', key: 'now' } as const, 0)
+const selftest = atom({ plugin: 'zero-progress', key: 'selftest' } as const, null)
 
 const TOOL = 'mcp__zero-progress__progress'
 const PANE = 'zero-agents'
@@ -671,6 +674,248 @@ async function applyTodo($: EngineInterface, tool: string, e: Record<string, unk
   })
 }
 
+// The ✕ on the bar, and the self-test's last step.
+async function dismissBar($: EngineInterface): Promise<void> {
+  await update($, bar, () => null)
+  if (trace) record({ kind: 'dismiss', isNull: (await read($, bar)) === null }, await $.clock.now())
+}
+
+// ---------------------------------------------------------------------------
+// Self-test: /zero-selftest types docs/live-test.md's prompts itself, records what
+// the bar and the pane drew, and grades the run. The trace is a module buffer, not
+// $.state: the render hooks record into it, and a render hook never writes state.
+
+const STEP_MS = 5 * 60_000
+const QUIET_MS = 3000
+
+let trace: Trace | null = null
+let lastBand = ''
+let lastPane = ''
+
+// Adds an event to the live run's trace; nothing when no run is live.
+const record = (ev: TraceInput, at: number): void => {
+  if (trace) trace.events.push({ ...ev, at, step: trace.step } as Trace['events'][number])
+}
+
+// The band and the pane redraw every second: only a change is evidence.
+const recordBand = (headline: string, label: string, side: string, at: number): void => {
+  if (!trace) return
+  const key = JSON.stringify([headline, label, side.includes('%') ? side : ''])
+  if (key === lastBand) return
+  lastBand = key
+  record({ kind: 'band', headline, label, side }, at)
+}
+
+const recordPane = (planHead: string, items: string[], rows: PaneRow[], at: number): void => {
+  if (!trace) return
+  const key = JSON.stringify([planHead, items, rows])
+  if (key === lastPane) return
+  lastPane = key
+  record({ kind: 'pane', planHead, items, rows }, at)
+}
+
+const paneRow = (a: AgentRun): PaneRow => ({
+  type: a.type,
+  costume: costumeOf(a.type, a.model),
+  status: a.status,
+  steps: a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}` : '',
+  stepNote: a.stepNote,
+})
+
+// The person, a peer or another plugin; a notice or a hand-back is part of the run.
+const isOutside = (o: PromptOrigin, self: string): boolean =>
+  o.kind === 'plugin' ? o.name !== self : !['task-notification', 'auto-continuation', 'unclassified', 'observer', 'observer-activity'].includes(o.kind)
+
+async function flush($: EngineInterface, file: string): Promise<void> {
+  if (trace) await $.fs.write(file, JSON.stringify(trace, null, 2)).catch(() => undefined)
+}
+
+// A reload mid-run empties the module buffer: pick the run up from its last flush.
+async function loadTrace($: EngineInterface, run: SelftestRun): Promise<boolean> {
+  if (trace?.runId === run.runId) return true
+  try {
+    const kept = JSON.parse(String(await $.fs.read(run.file))) as Trace
+    if (kept.runId !== run.runId) return false
+    trace = kept
+    record({ kind: 'note', text: 'the module reloaded; the trace resumed from its last flush' }, await $.clock.now())
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function snap($: EngineInterface): Promise<void> {
+  if (trace) record({ kind: 'snap', bar: await read($, bar), agents: await read($, agents) }, await $.clock.now())
+}
+
+async function noteTool($: EngineInterface, tool: string, agentId: string | undefined): Promise<void> {
+  if (!trace) return
+  const at = await $.clock.now()
+  record({ kind: 'tool', tool, agentId }, at)
+  const run = agentId ? (await read($, agents)).find(a => a.agentId === agentId) : undefined
+  if (agentId && run?.stepTotal) {
+    record({ kind: 'row', agentId, type: run.type, stepDone: run.stepDone ?? 0, stepTotal: run.stepTotal, stepNote: run.stepNote }, at)
+  }
+}
+
+async function noteSpawn($: EngineInterface, type: string, model: string, agentId: string | undefined): Promise<void> {
+  if (!trace) return
+  record({ kind: 'spawn', type, costume: costumeOf(type, model), agentId }, await $.clock.now())
+  // The pane opens unawaited: look a moment later.
+  $.clock.after(1000, () => void notePanes($))
+}
+
+async function notePanes($: EngineInterface): Promise<void> {
+  if (!trace) return
+  const pane = (await $.ui.panes()).find(p => p.id === PANE)
+  record({ kind: 'panes', isOpen: !!pane, isPlaced: pane?.isPlaced ?? false }, await $.clock.now())
+}
+
+async function onTurnStart($: EngineInterface, text: string, at: number): Promise<void> {
+  const run = await read($, selftest)
+  if (run?.status !== 'running' || !trace) return
+  record({ kind: 'turn', phase: 'start', title: titleOf(text) }, at)
+  await update($, selftest, r =>
+    r && r.runId === run.runId ? { ...r, isMainBusy: true, activeAt: at, isStepStarted: r.isStepStarted || !isFollowUp(text) } : r,
+  )
+}
+
+async function onTurnEnd($: EngineInterface, agentId: string | undefined, reason: string, at: number): Promise<void> {
+  const run = await read($, selftest)
+  if (run?.status !== 'running' || !trace) return
+  record({ kind: 'turn', phase: 'complete', agentId, reason }, at)
+  await update($, selftest, r => (r && r.runId === run.runId ? { ...r, isMainBusy: agentId ? r.isMainBusy : false, activeAt: at } : r))
+  // The quiet gap lets a task notice's follow-up turn start before the next prompt.
+  $.clock.after(QUIET_MS, () => void advance($))
+}
+
+async function startSelftest($: EngineInterface, autoOpen: boolean): Promise<string> {
+  const live = await read($, selftest)
+  if (live?.status === 'running') return `A self-test is already running (${live.file}). /zero-selftest stop ends it.`
+  const names = (await $.tool.list()).map(t => t.name)
+  const path = names.some(n => n === 'TodoWrite' || n === 'TaskCreate') ? 'todo' : 'progress'
+  const at = await $.clock.now()
+  const runId = new Date(at).toISOString().replace(/[:.]/g, '-')
+  const home = await $.env.get('HOME')
+  const file = home ? `${home}/.claude/zero-progress/selftest-${runId}.json` : `${$.plugin.root}/.selftest/selftest-${runId}.json`
+  const version = await $.fs
+    .read(`${$.plugin.root}/.claude-plugin/plugin.json`)
+    .then(text => String((JSON.parse(String(text)) as { version?: unknown }).version ?? '?'))
+    .catch(() => '?')
+  const b = await read($, bar)
+  trace = newTrace({ runId, root: $.plugin.root, version, path, autoOpen, startedAt: at })
+  lastBand = ''
+  lastPane = ''
+  await update($, selftest, () => ({
+    runId,
+    path,
+    status: 'running',
+    step: -1,
+    isStepStarted: true,
+    isMainBusy: !!b && !b.isTurnOver && !b.isFinished,
+    startedAt: at,
+    activeAt: at,
+    file,
+  }))
+  await flush($, file)
+  $.clock.after(QUIET_MS, () => void advance($))
+  return (
+    `Zero Progress self-test started: ${path} path, ${SCENARIO.length} steps, about 10 minutes. Hands off until the verdict.\n` +
+    `Testing ${$.plugin.root} (v${version}).\nReport: ${file}\n/zero-selftest stop ends it.`
+  )
+}
+
+// Submits the next step once nothing runs and the session has been quiet a moment.
+async function advance($: EngineInterface): Promise<void> {
+  const run = await read($, selftest)
+  if (run?.status !== 'running') return
+  if (!(await loadTrace($, run))) {
+    await update($, selftest, r => (r && r.runId === run.runId ? { ...r, status: 'ended' as const } : r))
+    $.ui.log('Zero Progress self-test: the module reloaded and its trace was lost; the run ended.')
+    return
+  }
+  if (!run.isStepStarted || run.isMainBusy) return
+  if ((await read($, agents)).some(a => a.status === 'running')) return
+  const at = await $.clock.now()
+  if (at - run.activeAt < QUIET_MS - 100) return
+
+  // Claim the step, so two timers never submit it twice.
+  const index = run.step + 1
+  const step = SCENARIO[index]
+  const claim: { isWon?: boolean } = {}
+  await update($, selftest, r => {
+    claim.isWon = false
+    if (!r || r.runId !== run.runId || r.status !== 'running' || r.step !== run.step || !r.isStepStarted || r.isMainBusy) return r
+    claim.isWon = true
+    return step ? { ...r, step: index, isStepStarted: false } : r
+  })
+  if (!claim.isWon) return
+  if (index > 0) await snap($)
+  if (!step) {
+    await finish($, 'done', 'all steps ran')
+    return
+  }
+
+  if (trace) trace.step = step.id
+  await prepare($, step.before)
+  record({ kind: 'submit' }, at)
+  await flush($, run.file)
+  $.ui.log(`Zero Progress self-test: step ${index + 1}/${SCENARIO.length} (${step.id}) ${firstLine(step.text[run.path])}`)
+  $.clock.after(STEP_MS, () => void timeout($, run.runId, index))
+  const sent = await $.prompt.submit({ text: step.text[run.path], asUser: true }).catch((err: unknown) => ({ drop: String(err) }))
+  if (sent.drop !== undefined) await finish($, 'interrupted', `step ${step.id}'s prompt was dropped: ${sent.drop}`)
+}
+
+async function prepare($: EngineInterface, before: (typeof SCENARIO)[number]['before']): Promise<void> {
+  const at = await $.clock.now()
+  if (before === 'dismiss') await dismissBar($)
+  if (before === 'open-pane') {
+    await update($, now, () => at)
+    const opened = await $.ui.open({ id: PANE, title: 'Agents' }).catch(() => undefined)
+    record({ kind: 'note', text: `opened the agents pane (isPlaced ${opened ? opened.isPlaced : 'unknown'})` }, at)
+  }
+  if (before === 'close-pane' && (await $.ui.panes()).some(p => p.id === PANE)) {
+    await $.ui.close({ id: PANE })
+    record({ kind: 'note', text: 'closed the agents pane, so the first spawn must open it' }, at)
+  }
+}
+
+async function timeout($: EngineInterface, runId: string, index: number): Promise<void> {
+  const run = await read($, selftest)
+  if (!run || run.runId !== runId || run.status !== 'running' || run.step !== index) return
+  await finish($, 'timed-out', `step ${SCENARIO[index]?.id ?? index} ran past ${STEP_MS / 60_000} minutes`)
+}
+
+// Grades the run, writes the report and logs each row. A finished or timed-out run
+// then asks the model to judge each fail; a stop or an outside prompt ends there.
+async function finish($: EngineInterface, status: Exclude<RunStatus, 'running'>, ending: string): Promise<string> {
+  const claim: { run?: SelftestRun } = {}
+  await update($, selftest, r => {
+    claim.run = undefined
+    if (!r || r.status !== 'running') return r
+    claim.run = r
+    return { ...r, status: 'ended' as const }
+  })
+  const run = claim.run
+  if (!run) return 'No self-test is running.'
+  if (!(await loadTrace($, run))) return 'The self-test ended without a trace.'
+  if (status !== 'done') await snap($)
+  const t = trace
+  if (!t) return 'The self-test ended without a trace.'
+  t.status = status
+  t.ending = ending
+  t.endedAt = await $.clock.now()
+  t.results = evaluate(t)
+  await flush($, run.file)
+  trace = null
+  const n = tally(t.results)
+  const summary = `Zero Progress self-test ${status} (${ending}): ${n.passed} passed, ${n.failed} failed, ${n.skipped} skipped. Report: ${run.file}`
+  $.ui.log(summary)
+  for (const r of t.results) $.ui.log(resultLine(r))
+  if (status === 'done' || status === 'timed-out') void $.prompt.submit({ text: reviewPrompt(t, run.file) }).catch(() => undefined)
+  return summary
+}
+
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -696,6 +941,12 @@ export const register: Register = (on, options) => {
       name: 'zero-agents',
       description: 'Show or hide the panel of subagents: running and finished, with model, plan, context, cost and time',
     })
+    await $.command.register({
+      name: 'zero-selftest',
+      description: 'Run the live test hands-off: types the test prompts, watches the bar and the pane, then grades the run',
+      argumentHint: '[stop]',
+      immediate: true,
+    })
     $.clock.every(1000, () => {
       void tick($)
     })
@@ -706,6 +957,31 @@ export const register: Register = (on, options) => {
     const isOpen = await togglePane($)
     return { text: isOpen ? 'Agents panel opened.' : 'Agents panel closed.' }
   })
+
+  on('command.run', { command: 'zero-selftest' }, async ($, e) => {
+    const arg = e.args.trim()
+    if (arg === 'stop') return { text: await finish($, 'stopped', 'stopped by /zero-selftest stop') }
+    if (arg) return { text: 'Usage: /zero-selftest starts a run; /zero-selftest stop ends one.' }
+    return { text: await startSelftest($, options.autoOpen !== false) }
+  })
+
+  // While a run is live: no suggestion to take, and a prompt from anyone else ends it.
+  on('prompt.suggest', async ($, e, next) => ((await read($, selftest))?.status === 'running' ? { isShown: false } : next(e)))
+
+  on('prompt.submit', async ($, e, next) => {
+    const run = await read($, selftest)
+    if (run?.status === 'running' && isOutside(e.origin, $.plugin.name)) {
+      await finish($, 'interrupted', `interrupted by an outside prompt (${e.origin.kind})`)
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // While a run is live nothing writes, and nothing waits on a dialog: Bash and questions are off too.
+  on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit', 'Bash', 'AskUserQuestion'] }, async ($, e, next) => {
+    if ((await read($, selftest))?.status !== 'running') return next(e)
+    const ask = e.tool === 'AskUserQuestion' ? ' Ask in plain text instead.' : ' Use Read, Grep or Glob.'
+    return { deny: `The Zero Progress self-test is running, so ${e.tool} is off until it ends.${ask}` }
+  }).catch(($, e, next) => next(e))
 
   // Only offered when the tool is in front and no todo tool is: one source of truth.
   on('prompt.compose', async ($, e, next) => {
@@ -727,6 +1003,7 @@ export const register: Register = (on, options) => {
       await update($, agents, list => list.filter(a => a.status === 'running'))
     }
     await update($, now, () => at)
+    await onTurnStart($, e.text, at)
     return next(e)
   })
 
@@ -738,6 +1015,7 @@ export const register: Register = (on, options) => {
       await update($, agents, list =>
         list.map(a => (a.agentId === agentId ? withItems(a, applyProgress(a.items ?? [], input), str(input.current)) : a)),
       )
+      await noteTool($, TOOL, agentId)
       return { result: 'ok' }
     }
     const at = await $.clock.now()
@@ -745,24 +1023,34 @@ export const register: Register = (on, options) => {
       const base = prev ?? newBar(str(input.title) ?? 'Working', at)
       return { ...base, title: str(input.title) ?? base.title, items: applyProgress(base.items, input), note: str(input.current) }
     })
+    await noteTool($, TOOL, undefined)
     return { result: b ? `ok: ${label(b, 0)}` : 'ok' }
   }).catch(() => ({ result: 'ok' }))
 
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined && !ran.isError) await applyTodo($, 'TodoWrite', e as unknown as Record<string, unknown>, ran.result)
+    if (ran.deny === undefined && !ran.isError) {
+      await applyTodo($, 'TodoWrite', e as unknown as Record<string, unknown>, ran.result)
+      await noteTool($, 'TodoWrite', (e as { agentId?: string }).agentId)
+    }
     return ran
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'TaskCreate' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined && !ran.isError) await applyTodo($, 'TaskCreate', e as unknown as Record<string, unknown>, ran.result)
+    if (ran.deny === undefined && !ran.isError) {
+      await applyTodo($, 'TaskCreate', e as unknown as Record<string, unknown>, ran.result)
+      await noteTool($, 'TaskCreate', (e as { agentId?: string }).agentId)
+    }
     return ran
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'TaskUpdate' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined && !ran.isError) await applyTodo($, 'TaskUpdate', e as unknown as Record<string, unknown>, ran.result)
+    if (ran.deny === undefined && !ran.isError) {
+      await applyTodo($, 'TaskUpdate', e as unknown as Record<string, unknown>, ran.result)
+      await noteTool($, 'TaskUpdate', (e as { agentId?: string }).agentId)
+    }
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -798,6 +1086,7 @@ export const register: Register = (on, options) => {
       const b = await read($, bar)
       await autoOpen($, b ? String(b.startedAt) : 'session')
     }
+    await noteSpawn($, e.subagentType, started.model, started.agentId)
     return started
   }).catch(($, e, next) => next(e))
 
@@ -867,6 +1156,7 @@ export const register: Register = (on, options) => {
     }
     await update($, now, () => at)
     await settle($)
+    await onTurnEnd($, agentId, e.reason, at)
     return next(e)
   })
 
@@ -903,6 +1193,7 @@ export const register: Register = (on, options) => {
     const isEmpty = list.length === 0 && items.length === 0
     const summary = `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} tokens, ${fmtTime(t.time)}`
     const planHead = `Plan · ${items.filter(i => i.status === 'completed').length}/${items.length}`
+    recordPane(items.length ? planHead : '', items.map(itemText), list.map(paneRow), at)
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui
@@ -1031,8 +1322,9 @@ export const register: Register = (on, options) => {
     const text = label(b, running)
     const side = b.items.length ? `${Math.round(ratio(b) * 100)}%` : fmtTime(barElapsed(b, at))
     const color = b.isFinished ? DONE : ACCENT
+    recordBand(headline(b), text, side, at)
     const crewButton = <Button key="zero-agents" label={`×${list.length}`} plain onPress={() => void togglePane($)} />
-    const dismiss = <Button key="zero-dismiss" label="✕" plain role="dismiss" onPress={() => update($, bar, () => null)} />
+    const dismiss = <Button key="zero-dismiss" label="✕" plain role="dismiss" onPress={() => dismissBar($)} />
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui
