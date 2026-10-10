@@ -107,6 +107,40 @@ test('the bar waits for running subagents, then settles to Done', async ($, on) 
   expect(await shown($)).toContain('Done')
 })
 
+test("each model step adds its tokens and cost to the bar or to the subagent's row", async ($, on) => {
+  core(on)
+  // What the API reports for each loop's step: main on Opus 5.5, the subagent on Haiku 5.5.
+  const usage: Record<string, { model: string; input_tokens: number; output_tokens: number }> = {
+    main: { model: 'claude-opus-5-5', input_tokens: 100_000, output_tokens: 10_000 },
+    a1: { model: 'claude-haiku-5-5', input_tokens: 40_000, output_tokens: 10_000 },
+  }
+  on('turn.step', async function* (_$, e) {
+    const u = usage[e.agentId ?? 'main']
+    const reported = u ? { ...u, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } : null
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: reported } as never
+  })
+  const step = async (model: string, agentId?: string, effort?: 'high') => {
+    const stream = $.turn.step({ turnId: 't', index: 0, model, messageCount: 1, ...(agentId ? { agentId } : {}), ...(effort ? { effort } : {}) })
+    for await (const _ of stream);
+    return stream.result
+  }
+
+  await start($, 'Count the cost')
+  await $.agent.spawn({ subagentType: 'Explore', description: 'Look around', tool_use_id: 'tu1', prompt: 'look' } as never)
+  await step('claude-opus-5-5')
+  await step('claude-haiku-5-5', 'a1', 'high')
+
+  // Main: 110k tokens at $4/$20 per M = $0.60, one step on the bar.
+  expect(await shown($)).toContain('1 step')
+  // Subagent: 50k of Haiku's 200k window = 25%, at $1/$5 per M = $0.09.
+  const pane = await shown($, 'Pane')
+  expect(pane).toContain('Haiku 5.5 · high')
+  expect(pane).toContain('ctx 25% · 50k ≈$0.09')
+  // Totals: both loops together.
+  expect(pane).toContain('≈$0.69')
+  expect(pane).toContain('160k tokens')
+})
+
 test('the band draws on the terminal and the desktop', async ($, on) => {
   core(on)
   await start($, 'Draw me')
